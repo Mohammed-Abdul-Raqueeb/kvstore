@@ -8,7 +8,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/raqueeb/kvstore/internal/protocol"
@@ -117,7 +116,7 @@ func dial(addr string, timeout time.Duration) (net.Conn, error) {
 		if err == nil {
 			return nc, nil
 		}
-		if !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(giveUp) {
+		if !isConnRefused(err) || !time.Now().Before(giveUp) {
 			return nil, err
 		}
 		time.Sleep(backoff)

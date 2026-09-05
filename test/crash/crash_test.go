@@ -428,7 +428,37 @@ func TestDeliberateWALCorruption(t *testing.T) {
 }
 
 // tryStart launches the server and reports whether it stayed up.
+// tryStart starts a kvserver against dataDir, retrying briefly if it refuses
+// because the previous occupant's lock still looks live.
+//
+// internal/engine/lock.go's DirLock is a PID file, not a real OS lock (its
+// own comment explains why: flock/LockFileEx have no portable equivalent).
+// Staleness is decided by asking the OS "does a process with this PID
+// exist" — and that comment already documents the tradeoff: "Known
+// limitation: PID reuse... we will conservatively refuse to start. Refusing
+// is the safe direction to be wrong in." Windows recycles PIDs far faster
+// than POSIX, and this test's caller kills the previous kvserver and
+// restarts one against the same directory back to back with no gap, which
+// is exactly the shape that tradeoff is about: a PID number can still read
+// as "alive" for a brief moment right after its true owner has exited. That
+// is a known, accepted conservatism in the lock's design, not a bug in it —
+// so the fix belongs here, tolerating the transient, rather than in the
+// lock's algorithm. A real corruption refusal or a genuine torn-tail
+// recovery never produces this exact message, so retrying on it can never
+// mask the behaviour this test actually checks.
 func tryStart(t *testing.T, bin, dataDir string, port int) (string, error) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := tryStartOnce(t, bin, dataDir, port)
+		if err == nil || !strings.Contains(out, "is locked by a running process") || !time.Now().Before(deadline) {
+			return out, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func tryStartOnce(t *testing.T, bin, dataDir string, port int) (string, error) {
 	t.Helper()
 	logPath := filepath.Join(dataDir, "trystart.log")
 	f, err := os.Create(logPath)

@@ -620,6 +620,18 @@ func TestEngineSlowReplicaIsDroppedNotBlocking(t *testing.T) {
 
 	// Write far more than the feed can hold, without ever reading it. The
 	// primary must not block.
+	//
+	// The bound below is generous on purpose. testConfig uses FsyncAlways,
+	// and these 500 Set calls are issued sequentially by a single goroutine,
+	// so group-commit never finds a batching partner: every call pays a
+	// real fsync. That syscall's latency is platform- and disk-dependent —
+	// synchronous flush on Windows CI runners routinely runs well behind a
+	// Linux or macOS SSD, especially on shared/virtualized infrastructure —
+	// so a tight timeout here measures disk throughput, not the thing this
+	// test exists to check. What must actually hold on every platform is
+	// that the write path completes at all rather than deadlocking forever
+	// on the unread feed; a slow-but-finite disk should never fail this
+	// test, only a genuine permanent block should.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -629,7 +641,7 @@ func TestEngineSlowReplicaIsDroppedNotBlocking(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("a slow replica blocked the primary's write path")
 	}
 

@@ -156,13 +156,21 @@ func (n *Node) replicateOnce() error {
 			// A full resync replaces our state wholesale. Clearing first
 			// matters: without it, keys the primary has since deleted would
 			// survive on the replica forever.
+			//
+			// This goes through ResetForFullResync, not Flush: Flush is the
+			// client-facing FLUSH command and refuses to run in read-only
+			// mode, which previously forced this call site to flip ReadOnly
+			// off for the duration of the reset so Flush's own guard would
+			// let it through. That made "a replica never accepts a client
+			// write" false for exactly the span of every full resync — the
+			// same window TestReplicaRejectsWrites was hitting, since a
+			// brand new replica does a full resync as part of its very
+			// first connection. ReadOnly now stays true for the entire
+			// resync; nothing here needs to touch it.
 			n.log.Info("full resync starting", "primary_lsn", msg.LSN)
-			n.eng.SetReadOnly(false)
-			if err := n.eng.Flush(); err != nil {
-				n.eng.SetReadOnly(true)
+			if err := n.eng.ResetForFullResync(); err != nil {
 				return err
 			}
-			n.eng.SetReadOnly(true)
 			inFullSync = true
 			n.repl.fullSyncs.Add(1)
 

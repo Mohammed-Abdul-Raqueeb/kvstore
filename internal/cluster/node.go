@@ -98,6 +98,18 @@ func New(cfg config.Config, eng *engine.Engine, logger *slog.Logger) *Node {
 		cancel:   cancel,
 	}
 	n.epoch.Store(1)
+	if cfg.Role == config.RoleReplica {
+		// Set here, synchronously, rather than waiting for Start: main.go
+		// calls cluster.New before srv.Start opens the listener, but Start
+		// itself runs after the listener is already accepting connections.
+		// Deferring this store to Start leaves a window, right after the
+		// port opens, where a client that connects immediately could have
+		// a write served as if this were a primary. Setting it here closes
+		// that window completely instead of just narrowing it. Start still
+		// sets it too, for callers that build a Node without following
+		// main.go's ordering.
+		n.eng.SetReadOnly(true)
+	}
 	return n
 }
 

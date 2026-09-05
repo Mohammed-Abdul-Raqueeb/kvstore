@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/raqueeb/kvstore/internal/protocol"
@@ -68,7 +69,7 @@ func DialWithOptions(o Options) (*Client, error) {
 	if o.Timeout <= 0 {
 		o.Timeout = 30 * time.Second
 	}
-	nc, err := net.DialTimeout("tcp", o.Addr, o.Timeout)
+	nc, err := dial(o.Addr, o.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +82,49 @@ func DialWithOptions(o Options) (*Client, error) {
 		bw:      bufio.NewWriterSize(nc, 64<<10),
 		timeout: o.Timeout,
 	}, nil
+}
+
+// connRefusedRetryWindow bounds how long dial retries a connection that is
+// being actively refused, as opposed to one nobody is listening on.
+//
+// The two look identical to net.DialTimeout, but the platforms disagree on
+// which case a full accept backlog is. Linux and macOS drop the SYN and let
+// the kernel's own retransmit timer paper over a brief burst, so a single
+// net.DialTimeout call usually still connects before its deadline even
+// while the server is momentarily saturated (see
+// TestManySimultaneousConnections, which opens 500 connections at once).
+// Windows instead answers a full backlog with an immediate RST, which
+// surfaces here as ECONNREFUSED on the very first attempt. Retrying for a
+// short, bounded window makes that case behave the same as the other two
+// platforms' kernels already do, while still failing fast (within ~2s, not
+// the full dial timeout) against an address nobody is listening on at all.
+const connRefusedRetryWindow = 2 * time.Second
+
+func dial(addr string, timeout time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(timeout)
+	giveUp := deadline
+	if retryDeadline := time.Now().Add(connRefusedRetryWindow); retryDeadline.Before(giveUp) {
+		giveUp = retryDeadline
+	}
+
+	backoff := 5 * time.Millisecond
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			remaining = time.Millisecond
+		}
+		nc, err := net.DialTimeout("tcp", addr, remaining)
+		if err == nil {
+			return nc, nil
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(giveUp) {
+			return nil, err
+		}
+		time.Sleep(backoff)
+		if backoff < 100*time.Millisecond {
+			backoff *= 2
+		}
+	}
 }
 
 // Close shuts the connection.

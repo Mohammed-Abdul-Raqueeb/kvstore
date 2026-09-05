@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: gofmt
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "run gofmt -w ."; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # The crash suite spawns real server processes and SIGKILLs them, so it
+      # needs a longer timeout than the Go default.
+      - name: test
+        run: go test -timeout 20m ./...
+
+      - name: test -race
+        run: go test -race -timeout 30m ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: fuzz protocol decoders
+        run: |
+          go test -run=xxx -fuzz=FuzzDecodeFrame    -fuzztime=60s ./internal/protocol/
+          go test -run=xxx -fuzz=FuzzDecodeCommand  -fuzztime=60s ./internal/protocol/
+          go test -run=xxx -fuzz=FuzzDecodeResponse -fuzztime=60s ./internal/protocol/
+
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [windows/amd64, darwin/arm64, darwin/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: build ${{ matrix.target }}
+        run: |
+          GOOS=$(echo ${{ matrix.target }} | cut -d/ -f1) \
+          GOARCH=$(echo ${{ matrix.target }} | cut -d/ -f2) \
+          go build ./...

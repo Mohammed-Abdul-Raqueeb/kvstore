@@ -166,10 +166,19 @@ func (e *Engine) mutate(rec wal.Record, apply func(store.Txn) error) error {
 // than as N deletes: writing a million DELETE records to express "everything
 // is gone" would be absurd, so FLUSH forces a snapshot of the (now empty)
 // store and truncates the log below it.
+//
+// This is the client-facing path (the FLUSH command), so it is rejected in
+// read-only mode like any other write. Internal callers that must clear the
+// keyspace without accepting client writes use resetKeyspace directly; see
+// ResetForFullResync.
 func (e *Engine) Flush() error {
 	if e.readOnly.Load() {
 		return ErrReadOnly
 	}
+	return e.resetKeyspace()
+}
+
+func (e *Engine) resetKeyspace() error {
 	e.store.Flush()
 	_, err := e.Snapshot()
 	return err
@@ -437,6 +446,17 @@ func (e *Engine) ApplyReplicated(rec wal.Record) error {
 	e.mutations.Add(1)
 	return nil
 }
+
+// ResetForFullResync clears the keyspace so a replica can receive a full
+// resync stream from its primary.
+//
+// It deliberately does not go through Flush's read-only check, and does
+// not require (or want) the caller to toggle ReadOnly off around the call.
+// A replica must reject client writes for the entire lifetime of a full
+// resync, not just immediately before and after it: flipping ReadOnly off
+// to satisfy Flush's guard, even briefly, would open exactly the window a
+// replica exists to close.
+func (e *Engine) ResetForFullResync() error { return e.resetKeyspace() }
 
 // SetReadOnly toggles replica mode.
 func (e *Engine) SetReadOnly(ro bool) { e.readOnly.Store(ro) }

@@ -127,6 +127,9 @@ type Subprocess struct {
 	DataDir string
 	LogPath string
 	t       *testing.T
+
+	waitOnce sync.Once
+	waitErr  error
 }
 
 var (
@@ -261,17 +264,42 @@ func (s *Subprocess) waitReady(timeout time.Duration) error {
 	return fmt.Errorf("timed out after %v", timeout)
 }
 
+// wait waits for the process to exit, memoizing the result so repeated
+// Kill/Stop calls only ever issue one real wait.
+//
+// Tests routinely kill and restart a server mid-test (see
+// TestReplicaResumesAfterPrimaryRestart, which calls primary.Kill() directly
+// and then relies on startPair's t.Cleanup(func() { primary.Stop() }) to
+// also run against the very same, already-dead Subprocess) — so a second
+// Kill/Stop on an already-reaped process is expected, not a bug in the
+// tests. On POSIX a redundant os.Process.Wait() call just returns "no child
+// processes" immediately, so it used to be harmless there. On Windows it is
+// not: it re-issues WaitForSingleObject on a process handle value that the
+// OS is free to recycle for an unrelated object the instant it's closed,
+// and that call can then block forever waiting on whatever that handle now
+// refers to — which is exactly the hang seen in CI (a 20 minute test
+// timeout inside a second, redundant Stop()). Memoizing with sync.Once
+// ensures the real wait syscall only ever runs once per process.
+func (s *Subprocess) wait() error {
+	s.waitOnce.Do(func() {
+		_, s.waitErr = s.Cmd.Process.Wait()
+	})
+	return s.waitErr
+}
+
 // Kill terminates the process ungracefully — SIGKILL on Unix,
 // TerminateProcess on Windows. Neither gives the server a chance to flush,
-// which is exactly the point.
+// which is exactly the point. Safe to call more than once, including after
+// Stop.
 func (s *Subprocess) Kill() {
 	if s.Cmd.Process != nil {
 		_ = s.Cmd.Process.Kill()
-		_, _ = s.Cmd.Process.Wait()
+		_ = s.wait()
 	}
 }
 
-// Stop terminates the process gracefully and waits for it to exit.
+// Stop terminates the process gracefully and waits for it to exit. Safe to
+// call more than once, including after Kill.
 func (s *Subprocess) Stop() error {
 	if s.Cmd.Process == nil {
 		return nil
@@ -281,7 +309,7 @@ func (s *Subprocess) Stop() error {
 		return nil
 	}
 	done := make(chan error, 1)
-	go func() { _, err := s.Cmd.Process.Wait(); done <- err }()
+	go func() { done <- s.wait() }()
 	select {
 	case <-done:
 		return nil
